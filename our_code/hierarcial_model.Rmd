@@ -1,0 +1,358 @@
+---
+title: "Cog403 Final Project"
+author: "Yvonne"
+date: '2024-03-25'
+output: pdf_document
+---
+
+```{r, include=FALSE}
+#install.packages("brms")
+# install.packages("Matrix")
+
+library(tidyr)
+library(brms)
+library(dplyr)
+library(lme4)
+library(MASS)
+library(kableExtra)
+library(tidyverse)
+library(broom)
+library(nlme)
+library(rstanarm)
+library(loo)
+library(bridgesampling)
+library(bayesplot)
+library(ggplot2)
+```
+
+
+```{r, include=FALSE}
+data <- read.csv("SharedResponses_combined_two_genders.csv")
+```
+
+```{r}
+nrow(data)
+```
+
+```{r}
+data <- distinct(data)
+```
+
+
+```{r}
+
+# data <-data[sample(1:nrow(data),100, replace=FALSE),]
+```
+
+```{r}
+nrow(data)
+```
+
+
+```{r}
+data <- data %>% drop_na()
+```
+
+```{r}
+drops <- c("ResponseID", "ExtendedSessionID", "UserID")
+data <- data[ , !(names(data) %in% drops)]
+```
+
+```{r}
+data$Saved <- factor(data$Saved)
+```
+
+```{r}
+data$Review_political_cat <- factor(data$Review_political_cat)
+```
+
+```{r}
+# data$AttributeLevel <- as.factor(data$AttributeLevel) # Convert to factor if it's not already
+# dummyVariables <- model.matrix(~ AttributeLevel - 1, data=data) 
+# 
+# # data$category <- as.factor(data$category) # Convert to factor if it's not already
+# # dummyVariables <- model.matrix(~ category - 1, data=data) 
+# 
+# # AttributeLevel+ScenarioTypeStrict+ScenarioType	+DefaultChoice+NonDefaultChoice
+# print(dummyVariables)
+```
+
+
+```{r}
+get_prior(Saved ~ 1 + . + (1 | Review_political_cat), data = data, family = bernoulli())
+
+```
+
+
+```{r}
+#normal logistic regression model
+
+# model2 <- glm(Saved ~ ScenarioOrder+PedPed+Barrier+CrossingSignal+AttributeLevel+ScenarioTypeStrict+ScenarioType+DefaultChoice+NonDefaultChoice+DefaultChoiceIsOmission+NumberOfCharacters+DiffNumberOFCharacters+Saved+Template+DescriptionShown+LeftHand+UserCountry3+Man+Woman+Pregnant+Stroller+OldMan+OldWoman+Boy+Girl+Homeless+LargeWoman+LargeMan+Criminal+MaleExecutive+FemaleExecutive+FemaleAthlete+MaleAthlete+FemaleDoctor+MaleDoctor+Dog+Cat+ Review_political_cat, data = data, family = "binomial")
+# summary(model)
+
+model2 <- glm(Saved ~ PedPed + Barrier + CrossingSignal + as.factor(AttributeLevel) + FemaleExecutive + Review_political_cat, data = data, family = "binomial")
+summary(model2)
+```
+
+
+```{r}
+
+#hierarical logistic regression model
+model <- glmer(Saved ~ PedPed + Barrier + CrossingSignal + as.factor(AttributeLevel) + FemaleExecutive + (1|Review_political_cat), data = data, family = "binomial")
+summary(model)
+```
+
+
+
+```{r}
+step <- stepAIC(model2, trace = TRUE, direction= "both")
+```
+
+```{r}
+step %>%
+  tidy() %>%
+  kable(caption = "Regular Logistic Regresion Model")
+```
+
+
+```{r}
+# step <- stepAIC(model, trace = TRUE, direction= "both")
+```
+
+If we are not using the bayesian approach, instead of DIC, bayes ratio and predictive checks use:
+
+- Information Criterion (AIC and BIC) - lower = beter
+- Likelihood ratio test - we can use the likelihood ratio to test the models directly - compares log likelihoods and the numebr of parameters in each
+- Cross validation - kfold corss validation or leave one out cross validation - avarege perfornace across all folds ca be used as an indicator a model generalization
+- Model fit statistics - Concordance Statiistic (C-statistic), ROC or AUC - meausre of models predicitive accuracy - 0.5 = chance, 1 = perfect prediction
+- Wlads test and thier confidence intercals
+- Diagnostic plots - residual plots, and influence diagnostics
+- leverage and studentized residuals
+
+
+# Testing AIC
+
+```{r}
+AIC(model)
+AIC(model2)
+```
+
+# Likelihood Ratio Test
+
+```{r}
+lrt_result <- anova(model, model2)
+print(lrt_result)
+```
+
+The hierarical model has a lower AIC and BIC, which indicates a slightly better fit. The log likelihood is also identical between the models , indicating both models have the same likelihood of observing the data given the model parameters. The deviance is a measure of goodness of fit; lower values indicate a better fit. Both models have identical deviance (2246.2), suggesting they fit the data equally well.
+
+The Chisq test is 0 indicating there is no differnce between the models. The p-value is also very high, indicating they are the same.
+
+# K - Fold Cross Validation
+
+```{r}
+set.seed(123) # For reproducibility
+data_cv <- data
+data_cv$data_id <- rownames(data_cv) # Assign row names as a new column for tracking
+
+# Creating 5 folds
+folds <- cut(seq(1,nrow(data_cv)), breaks=5, labels=FALSE)
+```
+
+
+```{r}
+results <- data.frame(fold = integer(), rmse_lm = numeric(), rmse_mem = numeric())
+
+for(i in 1:5){
+  # Splitting the data into training and testing sets
+  train_indices <- which(folds != i)
+  test_indices <- which(folds == i)
+  train_data <- data_cv[train_indices, ]
+  test_data <- data_cv[test_indices, ]
+  
+  # Fitting the non-hierarchical model
+  lm_model <- glm(Saved ~ PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + Review_political_cat, data = train_data, family = "binomial")
+  
+  # Fitting the hierarchical model
+  mem_model <- glmer(Saved ~ PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + (1|Review_political_cat), data = train_data, family = "binomial")
+  
+  # Making predictions
+  pred_lm <- predict(lm_model, newdata = test_data, type = "response") # ensure type is response for binomial
+  pred_mem <- predict(mem_model, newdata = test_data, re.form=NA, type = "response")
+  
+  # Calculating RMSE
+  rmse_lm <- sqrt(mean((test_data$Saved - pred_lm)^2, na.rm = TRUE)) # adding na.rm=TRUE to handle any NA values
+  rmse_mem <- sqrt(mean((test_data$Saved - pred_mem)^2, na.rm = TRUE))
+  
+  # Storing results
+  results <- rbind(results, data.frame(fold = i, rmse_lm = rmse_lm, rmse_mem = rmse_mem))
+}
+
+print(results)
+```
+
+
+```{r}
+summary_results <- summarise(results, avg_rmse_lm = mean(rmse_lm), avg_rmse_mem = mean(rmse_mem))
+print(summary_results)
+```
+
+# Bayesian Model
+
+```{r}
+get_prior(Saved ~ 1 + PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + Review_political_cat, data = data, family = bernoulli())
+```
+```{r}
+priors <- c(
+  set_prior("normal(0, 1)", class = "b"),
+  set_prior("student_t(3, 0, 2.5)", class = "Intercept")
+  )
+```
+
+
+```{r}
+
+# Define the model
+model_nonhierarchical <- brm(
+  formula = Saved ~ 1 + PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + Review_political_cat, # Model formula
+  data = data,
+  family = bernoulli("logit"), # Assuming 'Saved' is binary; using logistic regression
+  prior = priors,
+  save_pars = save_pars(all = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+# Summary of the model
+summary(model_nonhierarchical)
+```
+
+```{r}
+priors2 <- c(
+  set_prior("normal(0, 2.5)", class = "b"), # For fixed effects
+  set_prior("normal(0, 1)", class = "Intercept"),
+  set_prior("cauchy(0, 2.5)", class = "sd") # For random effects standard deviation
+)
+```
+
+
+```{r}
+model_hierarchical <- brm(
+  Saved ~ 1 + PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + (1 | Review_political_cat),
+  data = data,
+  family = bernoulli(),
+  prior = priors2,
+  save_pars = save_pars(all = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+```
+
+
+```{r}
+# model <- lmer(Saved ~ Man+Woman+Pregnant+ (1 | Review_political_factor),
+#   data = data)
+```
+
+
+```{r}
+# model <- brm(
+#   Saved ~ 1 + (1 | Review_political_factor),
+#   data = data,
+#   family = bernoulli(),
+#   prior = c(set_prior("student_t(3, 0, 2.5)", class = "Intercept"),
+#             set_prior("student_t(3, 0, 2.5)", class = "sd")),
+#   chains = 4,
+#   iter = 200,
+#   seed = 123
+# )
+```
+
+```{r}
+plot(model_nonhierarchical)
+```
+```{r}
+plot(model_hierarchical)
+```
+
+```{r}
+summary(model_hierarchical)
+```
+
+```{r}
+summary(model_nonhierarchical)
+```
+
+
+Both models have good convergegence based on rhat values which are close to 1.
+
+The sampling in the non hierarical model may be better (larger sample size) - due to BUlk_ESS and Tail_ESS
+
+WE may prefer the non hierarical model because the results are simler
+
+
+# Testing the bayesian models
+
+
+# Watanabe–Akaike Information criterion
+```{r}
+waic_model_h <- waic(model_hierarchical)
+waic_model_nh <- waic(model_nonhierarchical)
+```
+
+
+```{r}
+loo_compare(waic_model_h, waic_model_nh)
+```
+This measures the predicitve accuracy of the models using leave one out cross validation. We can see the hierarical model has a hiher expected log pontwise predictive density (ELPD) which indicates it is better at predicitng the data. However looking ath the standard error of difference between the two models, these results are extremely small and not stuatucally significant.                      
+
+                     elpd_diff se_diff
+model_hierarchical     0.0       0.0   
+model_nonhierarchical -0.2       1.5   
+
+
+# Bayes Factor
+
+```{r}
+bridgeh <- bridge_sampler(model_hierarchical)
+bridgenh <- bridge_sampler(model_nonhierarchical)
+```
+
+```{r}
+bf <- bayes_factor(bridgeh, bridgenh)
+bf
+```
+
+Due to the bayes factor being less than 2, there is evidence in favour of the non hierarical model. It states that the non-hierarical model is more liekly given the data compared to the hierarical one.
+
+```{r}
+bf <- bayes_factor(bridgenh, bridgeh)
+bf
+```
+
+
+If we take hte inverse of the bayes factorm we get a value of 30.159 which suggests strong evidence that gien the data the non-hierarcial model is more likely.
+
+
+# Posterior Predicitve Checks
+
+```{r}
+ppd_hierarchical <- posterior_predict(model_hierarchical)
+color_scheme_set("brightblue")
+pp_check(model_hierarchical, type = "hist", nsamples = 4)
+
+
+```
+
+```{r}
+ppd_nonhierarchical <- posterior_predict(model_nonhierarchical)
+
+color_scheme_set("brightblue")
+pp_check(model_nonhierarchical, type = "hist", nsamples = 5)
+
+```
+
+
+
