@@ -1,0 +1,392 @@
+---
+title: "Cog403 Final Project"
+author: "Yvonne"
+date: '2024-03-25'
+output: pdf_document
+---
+
+#Installing Packages
+
+```{r, include=FALSE}
+
+#Installing Packages
+
+set.seed(123)
+
+library(tidyr)
+library(brms)
+library(dplyr)
+library(lme4)
+library(MASS)
+library(kableExtra)
+library(tidyverse)
+library(broom)
+library(nlme)
+library(rstanarm)
+library(loo)
+library(bridgesampling)
+library(bayesplot)
+library(ggplot2)
+```
+
+
+
+```{r, include=FALSE}
+# loading data
+
+data <- read.csv("SharedResponses_combined_two_genders.csv")
+```
+
+
+```{r}
+# getting distinct data points
+
+data <- distinct(data)
+```
+
+
+```{r}
+# drop missing data rows
+
+data <- data %>% drop_na()
+```
+
+
+```{r}
+# drop certain irrelevant variables
+
+drops <- c("ResponseID", "ExtendedSessionID","Review_political", "UserID")
+data <- data[ , !(names(data) %in% drops)]
+```
+
+```{r}
+# Ensure "Saved" is categorical
+
+data$Saved <- factor(data$Saved)
+```
+
+```{r}
+# Ensure "Review_poltical_cat" is categorical
+
+data$Review_political_cat <- factor(data$Review_political_cat)
+```
+
+
+
+```{r}
+# Fitting a regular multi linear regression with all variables
+
+model2 <- glm(Saved ~ ., data = data, family = "binomial")
+```
+
+
+
+```{r}
+# Using a stepwise AIC to determine relevant predictors
+
+step <- stepAIC(model2, trace = TRUE, direction= "both")
+```
+
+```{r}
+# Viewing selected predictors from AIC stepwise funciton
+
+step %>%
+  tidy() %>%
+  kable(caption = "Regular Logistic Regresion Model")
+```
+
+
+
+
+# Bayesian Model
+
+```{r}
+# getting priors for non-hierarical bayesian model
+
+get_prior(Saved ~ 1 + PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + Review_political_cat, data = data, family = bernoulli())
+```
+
+
+```{r}
+
+# setting priors for a non-hierarical bayesian model
+
+priors <- c(
+  set_prior("normal(0, 1)", class = "b"),
+  set_prior("student_t(3,0,2.5)", class = "Intercept")
+  )
+
+```
+
+
+```{r}
+#fitting a logistic non-hierarical bayesian regression model (base model)
+
+# Define the model
+model_nonhierarchical <- brm(
+  formula = Saved ~ 1 + PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + Review_political_cat
+  , # Model formula
+  data = data,
+  family = bernoulli("logit"), # Assuming 'Saved' is binary; using logistic regression
+  prior = priors,
+  save_pars = save_pars(all = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+# Summary of the model
+summary(model_nonhierarchical)
+```
+```{r}
+#getting the priors for the logistic hierarical bayesian regression model with politcal orienation as the levels
+
+get_prior(Saved ~ 1 + PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + (1 | Review_political_cat), data = data, family = bernoulli())
+```
+
+
+
+```{r}
+# setting the priors for the logistic hierarchical Bayesian model (hierarical model)
+
+priors2 <- c(
+  set_prior("normal(0, 2.5)", class = "b"), # For fixed effects
+  set_prior("student_t(3,0,2.5)", class = "Intercept"),
+  set_prior("student_t(3,0,2.5)", class = "sd") # For random effects standard deviation
+)
+```
+
+
+```{r}
+# fitting a logistic hierarchical Bayesian model
+
+model_hierarchical <- brm(
+  Saved ~ 1 + PedPed + Barrier + CrossingSignal + AttributeLevel + FemaleExecutive + (1 | Review_political_cat),
+  data = data,
+  family = bernoulli(),
+  prior = priors2,
+  save_pars = save_pars(all = TRUE),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+```
+
+
+```{r}
+# visualizing the base model
+
+plot(model_nonhierarchical)
+```
+
+
+
+```{r}
+# visualizing the hierarchical model
+
+plot(model_hierarchical)
+```
+
+```{r}
+# hierarchical model summary
+
+summary(model_hierarchical)
+```
+
+```{r}
+# base model summary
+
+summary(model_nonhierarchical)
+```
+
+
+Both models have good convergegence based on rhat values which are close to 1.
+
+The sampling in the non hierarical model may be better (larger sample size) - due to BUlk_ESS and Tail_ESS
+
+WE may prefer the non hierarical model because the results are simler
+
+
+# Assessing Models
+
+# Trace Plots
+
+```{r}
+# hierarical model trace plots
+
+mcmc_trace(model_hierarchical)
+```
+
+```{r}
+# base model trace plots
+
+mcmc_trace(model_nonhierarchical)
+```
+
+# AutoCorrelation Plot
+```{r}
+# Hierarchical model autocorrelation plots 
+
+mcmc_acf(model_hierarchical)
+```
+
+```{r}
+# Non hierarical model autocorrelation plots
+
+mcmc_acf(model_nonhierarchical)
+```
+
+# R hat (Gelman-Rubin Diagnostic)
+```{r}
+print(summary(model_hierarchical)$summary[,"Rhat"])
+```
+```{r}
+print(summary(model_nonhierarchical)$summary[,"Rhat"])
+```
+# Effective Sample Size
+```{r}
+print(summary(model_hierarchical)$summary[,"n_eff"])
+```
+```{r}
+print(summary(model_nonhierarchical)$summary[,"n_eff"])
+```
+# Posterior Predicitve check
+```{r}
+library(bayesplot)
+
+# Set a color scheme that is color-blind friendly
+color_scheme_set("blue")
+
+# Perform posterior predictive check with a density overlay and a reasonable number of samples
+# Include the observed data (usually the default)
+pp_check(model_hierarchical, type = "dens_overlay", nsamples = 50)
+
+# Additionally, customize the plot using ggplot2 functionality
+pp_plot <- pp_check(model_hierarchical, type = "dens_overlay", nsamples = 50)
+
+# Use ggplot2 to further customize
+library(ggplot2)
+pp_plot +
+  ggtitle("Posterior Predictive Check: Hierarical Model") +
+  xlab("Predicted Values") +
+  ylab("Density") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# Set a color scheme that is color-blind friendly
+color_scheme_set("blue")
+
+# Perform posterior predictive check with a density overlay and a reasonable number of samples
+# Include the observed data (usually the default)
+pp_check(model_nonhierarchical, type = "dens_overlay", nsamples = 50)
+
+# Additionally, customize the plot using ggplot2 functionality
+pp_plot <- pp_check(model_hierarchical, type = "dens_overlay", nsamples = 50)
+
+# Use ggplot2 to further customize
+pp_plot +
+  ggtitle("Posterior Predictive Check: Base Model") +
+  xlab("Predicted Values") +
+  ylab("Density") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+
+# Testing the bayesian models
+
+
+# Leave One Out Cross Validation
+```{r}
+loo_model_h <- loo(model_hierarchical)
+loo_model_nh <- loo(model_nonhierarchical)
+```
+
+
+```{r}
+print(loo_model_h)
+print(loo_model_nh)
+```
+
+
+```{r}
+loo_compare(loo_model_h, loo_model_nh)
+```
+
+This measures the predictive accuracy of the models using leave one out cross validation. We can see the hierarchical model has a higher expected log point wise predictive density (ELPD) which indicates it is better at predicting the data. However looking at the standard error of difference between the two models, these results are extremely small and not statistically significant.                      
+ 
+
+# Watanabe–Akaike Information criterion
+```{r}
+waic_model_h <- waic(model_hierarchical)
+waic_model_nh <- waic(model_nonhierarchical)
+```
+
+
+```{r}
+print(waic_model_h)
+print(waic_model_nh)
+```
+
+
+# Bayes Factor
+
+```{r}
+bridgeh <- bridge_sampler(model_hierarchical)
+bridgenh <- bridge_sampler(model_nonhierarchical)
+```
+
+```{r}
+bf <- bayes_factor(bridgeh, bridgenh)
+bf
+```
+
+Due to the bayes factor being less than 2, there is evidence in favour of the non hierarical model. It states that the non-hierarical model is more liekly given the data compared to the hierarical one.
+
+```{r}
+bf <- bayes_factor(bridgenh, bridgeh)
+bf
+```
+
+
+If we take the inverse of the bayes factor we get a value of 30.159 which suggests strong evidence that gien the data the non-hierarchical model is more likely.
+
+
+# Posterior Predicitve Checks
+
+```{r}
+ppd_hierarchical <- posterior_predict(model_hierarchical)
+color_scheme_set("brightblue")
+pp_check(model_hierarchical, type = "hist", nsamples = 4)
+
+
+```
+
+```{r}
+ppd_combined <- data.frame(iteration = rep(1:4, each = nrow(ppd_hierarchical)),
+                           value = c(ppd_hierarchical[,1],
+                                     ppd_hierarchical[,2],
+                                     ppd_hierarchical[,3],
+                                     ppd_hierarchical[,4]))
+
+# Create the histogram with ggplot
+ggplot(ppd_combined, aes(x = value, fill = as.factor(iteration))) +
+  geom_histogram(alpha = 0.5, position = "identity") +
+  scale_fill_manual(values = c("#0000FF", "#5555FF", "#AAAAFF", "#FFFFFF")) +
+  theme_minimal()
+```
+
+
+```{r}
+ppd_nonhierarchical <- posterior_predict(model_nonhierarchical)
+
+color_scheme_set("brightblue")
+pp_check(model_nonhierarchical, type = "hist", nsamples = 5)
+
+```
+
+
+
